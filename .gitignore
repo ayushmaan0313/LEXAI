@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Dataset (download separately — see README)
+data/ALL_Blast/
+data/ALL_Early_Pre_B/
+data/ALL_Pre_B/
+data/ALL_Pro_B/
+data/Benign/
+data/ALL/
+data/AML/
+data/CML/
+data/Normal/
+data/raw/
+
+# Model checkpoints (large binary files)
+checkpoints/
+*.pth
+*.pt
+
+# Logs
+*.log
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Demo data
+demo_data/
+
+# Misc
+.env
+.kaggle/
