@@ -135,8 +135,12 @@ def organize_aml(raw_dir: Path, output_dir: Path):
     aml_dir.mkdir(parents=True, exist_ok=True)
     normal_dir.mkdir(parents=True, exist_ok=True)
 
-    # AML-indicative cell types
-    aml_types = {"bla", "blast", "apl", "pmo", "promyelocyte", "myb", "myeloblast"}
+    # AML-indicative cell types (immature myeloid cells)
+    aml_types = {
+        "bla", "blast", "apl", "pmo", "promyelocyte", "myb", "myeloblast",
+        "myo", "myelocyte", "mob", "monoblast", "pmb", "ksc", "mmz",
+        "metamyelocyte", "ebo", "erythroblast", "ngb",
+    }
     count_aml, count_normal = 0, 0
 
     for img_path in raw_dir.rglob("*"):

@@ -168,10 +168,8 @@ class Trainer:
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
         """Run validation."""
         self.model.eval()
+        self.metrics.reset()
         total_loss = 0.0
-        all_preds = []
-        all_labels = []
-        all_probs = []
         num_batches = 0
 
         for batch in val_loader:
@@ -189,18 +187,16 @@ class Trainer:
             probs = predictions["probabilities"]
             preds = predictions["predicted_class"]
 
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_probs.extend(probs.cpu().numpy())
+            self.metrics.update(
+                labels.cpu().numpy(),
+                preds.cpu().numpy(),
+                probs.cpu().numpy(),
+            )
 
         avg_loss = total_loss / max(num_batches, 1)
 
-        # Compute metrics
-        metrics = self.metrics.compute(
-            np.array(all_preds),
-            np.array(all_labels),
-            np.array(all_probs),
-        )
+        # Compute metrics from accumulated data
+        metrics = self.metrics.compute()
 
         return {"total_loss": avg_loss, **metrics}
 

@@ -22,6 +22,14 @@ class DataConfig:
     mean: Tuple[float, float, float] = (0.485, 0.456, 0.406)
     std: Tuple[float, float, float] = (0.229, 0.224, 0.225)
 
+    @classmethod
+    def aml_preset(cls) -> "DataConfig":
+        """Config for 3-class AML detection: ALL / AML / Normal."""
+        return cls(
+            num_classes=3,
+            class_names=["ALL", "AML", "Normal"],
+        )
+
 
 @dataclass
 class CNNConfig:
@@ -98,6 +106,11 @@ class LEXAIConfig:
     fusion: FusionConfig = field(default_factory=FusionConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+
+    @classmethod
+    def with_aml_preset(cls) -> "LEXAIConfig":
+        """Create config for 3-class AML detection (ALL / AML / Normal)."""
+        return cls(data=DataConfig.aml_preset())
 
 
 # Global default config

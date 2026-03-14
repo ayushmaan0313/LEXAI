@@ -29,13 +29,22 @@ def main():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument(
+        "--preset", type=str, default="default",
+        choices=["default", "aml"],
+        help="Config preset: 'default' (5-class ALL subtypes) or 'aml' (3-class ALL/AML/Normal)"
+    )
+    parser.add_argument(
         "--resume", type=str, default=None,
         help="Path to checkpoint to resume training from"
     )
     args = parser.parse_args()
 
     # Config
-    config = LEXAIConfig()
+    if args.preset == "aml":
+        config = LEXAIConfig.with_aml_preset()
+        print(f"Using AML preset: {config.data.num_classes} classes {config.data.class_names}")
+    else:
+        config = LEXAIConfig()
     config.training.epochs = args.epochs
     config.training.batch_size = args.batch_size
     config.training.learning_rate = args.lr

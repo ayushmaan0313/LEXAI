@@ -143,8 +143,8 @@ class TestLEXAIModel:
         model.eval()
         with torch.no_grad():
             out = model(dummy_image, graph_data=None)
-        assert out["logits"].shape == (2, 4)
-        assert out["probabilities"].shape == (2, 4)
+        assert out["logits"].shape == (2, config.data.num_classes)
+        assert out["probabilities"].shape == (2, config.data.num_classes)
         assert out["predicted_class"].shape == (2,)
         assert out["blast_percentage"].shape == (2, 1)
         assert out["spatial_score"].shape == (2, 1)
@@ -153,21 +153,22 @@ class TestLEXAIModel:
         from lexai.models.lexai_model import LEXAIModel
         config.cnn.pretrained = False
         model = LEXAIModel(config)
-        assert model.get_class_name(0) == "ALL"
-        assert model.get_class_name(3) == "Normal"
+        assert model.get_class_name(0) == config.data.class_names[0]
+        last_idx = config.data.num_classes - 1
+        assert model.get_class_name(last_idx) == config.data.class_names[last_idx]
 
 
 class TestMultiTaskLoss:
-    def test_loss_computation(self):
+    def test_loss_computation(self, config):
         from lexai.training.losses import MultiTaskLoss
         criterion = MultiTaskLoss()
         predictions = {
-            "logits": torch.randn(4, 4, requires_grad=True),
+            "logits": torch.randn(4, config.data.num_classes, requires_grad=True),
             "spatial_score": torch.rand(4, 1, requires_grad=True),
             "blast_percentage": torch.rand(4, 1, requires_grad=True) * 100,
         }
         targets = {
-            "labels": torch.randint(0, 4, (4,)),
+            "labels": torch.randint(0, config.data.num_classes, (4,)),
         }
         loss_dict = criterion(predictions, targets)
         assert "total_loss" in loss_dict
@@ -175,15 +176,15 @@ class TestMultiTaskLoss:
 
 
 class TestMetrics:
-    def test_metrics_computation(self):
+    def test_metrics_computation(self, config):
         from lexai.training.metrics import MetricsCalculator
-        calc = MetricsCalculator()
-        labels = np.array([0, 1, 2, 3, 0, 1])
-        preds = np.array([0, 1, 2, 3, 1, 1])
-        probs = np.zeros((6, 4))
+        calc = MetricsCalculator(config.data.class_names)
+        labels = np.array([0, 1, 2, 0, 0, 1])
+        preds = np.array([0, 1, 2, 0, 1, 1])
+        probs = np.zeros((6, config.data.num_classes))
         for i in range(6):
             probs[i, preds[i]] = 0.9
-            for j in range(4):
+            for j in range(config.data.num_classes):
                 if j != preds[i]:
                     probs[i, j] = 0.1 / 3
         calc.update(labels, preds, probs)
@@ -221,4 +222,4 @@ class TestUncertainty:
         assert "mean_probabilities" in result
         assert "confidence" in result
         assert result["confidence"].shape == (1,)
-        assert result["mean_probabilities"].shape == (1, 4)
+        assert result["mean_probabilities"].shape == (1, config.data.num_classes)

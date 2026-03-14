@@ -52,7 +52,7 @@ class TestEndToEndPipeline:
         assert result["predicted_class"] in config.data.class_names
 
         assert "probabilities" in result
-        assert len(result["probabilities"]) == 4
+        assert len(result["probabilities"]) == len(config.data.class_names)
 
         assert "confidence" in result
         assert 0 <= result["confidence"] <= 1
