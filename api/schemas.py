@@ -60,6 +60,12 @@ class AnalysisResult(BaseModel):
         description="Attention weights per CNN backbone"
     )
 
+    # Per-cell analysis
+    cell_analysis: List[Dict] = Field(
+        default_factory=list,
+        description="Per-cell classification results with class, confidence, bbox"
+    )
+
 
 class HealthResponse(BaseModel):
     """Health check response."""

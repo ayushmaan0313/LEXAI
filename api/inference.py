@@ -3,7 +3,7 @@
 import base64
 import io
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -11,7 +11,8 @@ import torch
 from PIL import Image
 
 from lexai.config import LEXAIConfig, DEFAULT_CONFIG
-from lexai.data.preprocessing import preprocess_image, tensor_to_numpy
+from lexai.data.preprocessing import preprocess_image, get_inference_transform, tensor_to_numpy
+from lexai.data.segmentation import CellSegmenter
 from lexai.models.lexai_model import LEXAIModel
 from lexai.explainability.gradcam import GradCAM, MultiBackboneGradCAM
 from lexai.explainability.gnn_explain import GNNExplainer
@@ -50,6 +51,10 @@ class InferencePipeline:
         # Explainability (initialized lazily)
         self._gradcam = None
         self._uncertainty = None
+
+        # Cell segmenter + inference transform for per-cell classification
+        self._segmenter = CellSegmenter()
+        self._inference_transform = get_inference_transform(self.config.data)
 
     def _get_device(self, device: str) -> torch.device:
         if device == "auto":
@@ -111,6 +116,25 @@ class InferencePipeline:
             name: float(probs[i])
             for i, name in enumerate(self.config.data.class_names)
         }
+
+        # --- Per-cell classification for full-field images ---
+        cells = result.get("cells", [])
+        cell_analyses = []
+        if len(cells) >= 3:
+            cell_analyses = self._classify_cells(original_bgr, cells)
+            # Override prediction with aggregated per-cell vote
+            if cell_analyses:
+                agg_probs = np.zeros(len(self.config.data.class_names))
+                for ca in cell_analyses:
+                    for i, name in enumerate(self.config.data.class_names):
+                        agg_probs[i] += ca["probabilities"].get(name, 0.0)
+                agg_probs /= len(cell_analyses)
+                pred_idx = int(np.argmax(agg_probs))
+                pred_class = self.config.data.class_names[pred_idx]
+                prob_dict = {
+                    name: float(agg_probs[i])
+                    for i, name in enumerate(self.config.data.class_names)
+                }
 
         # --- Explainability ---
 
@@ -222,7 +246,71 @@ class InferencePipeline:
             "gradcam_heatmap": gradcam_b64,
             "gnn_graph_visualization": gnn_viz_b64,
             "cnn_backbone_weights": backbone_weights,
+            "cell_analysis": cell_analyses,
         }
+
+    def _classify_cells(
+        self,
+        image_bgr: np.ndarray,
+        cells,
+    ) -> List[Dict[str, Any]]:
+        """
+        Classify each segmented cell individually.
+
+        Crops each cell from the full image, pads to square,
+        resizes to model input size, and runs through CNN.
+
+        Returns:
+            List of per-cell analysis dicts with class, probs, bbox.
+        """
+        results = []
+        h, w = image_bgr.shape[:2]
+
+        for cell in cells:
+            x, y, bw, bh = cell.bbox
+
+            # Pad crop to square with 20% margin
+            size = max(bw, bh)
+            margin = int(size * 0.2)
+            size_padded = size + 2 * margin
+
+            cx, cy = cell.centroid
+            x1 = max(0, cx - size_padded // 2)
+            y1 = max(0, cy - size_padded // 2)
+            x2 = min(w, x1 + size_padded)
+            y2 = min(h, y1 + size_padded)
+
+            crop = image_bgr[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+
+            # Convert BGR crop to PIL RGB
+            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            pil_crop = Image.fromarray(crop_rgb)
+
+            # Preprocess and classify
+            tensor = self._inference_transform(pil_crop).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                output = self.model(tensor, graph_data=None)
+
+            probs = output["probabilities"][0].cpu().numpy()
+            pred_idx = int(probs.argmax())
+            pred_class = self.config.data.class_names[pred_idx]
+
+            results.append({
+                "cell_id": len(results),
+                "predicted_class": pred_class,
+                "confidence": float(probs[pred_idx]),
+                "probabilities": {
+                    name: float(probs[i])
+                    for i, name in enumerate(self.config.data.class_names)
+                },
+                "bbox": {"x": int(x), "y": int(y), "w": int(bw), "h": int(bh)},
+                "centroid": {"x": int(cell.centroid[0]), "y": int(cell.centroid[1])},
+            })
+
+        return results
 
     @staticmethod
     def _encode_image(bgr_image: np.ndarray) -> str:
