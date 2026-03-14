@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from api.schemas import AnalysisResult, HealthResponse
 from api.inference import InferencePipeline
-from lexai.config import DEFAULT_CONFIG
+from lexai.config import DEFAULT_CONFIG, LEXAIConfig
 
 
 # Initialize FastAPI
@@ -42,10 +42,16 @@ checkpoint_path = os.environ.get(
     str(PROJECT_ROOT / "checkpoints" / "best_model.pth"),
 )
 device = os.environ.get("LEXAI_DEVICE", "auto")
+preset = os.environ.get("LEXAI_PRESET", "aml")
+
+if preset == "aml":
+    config = LEXAIConfig.with_aml_preset()
+else:
+    config = DEFAULT_CONFIG
 
 pipeline = InferencePipeline(
     checkpoint_path=checkpoint_path,
-    config=DEFAULT_CONFIG,
+    config=config,
     device=device,
 )
 

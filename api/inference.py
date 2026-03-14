@@ -114,9 +114,12 @@ class InferencePipeline:
 
         # --- Explainability ---
 
-        # Grad-CAM
+        # Grad-CAM (needs gradients enabled)
         try:
-            heatmaps = self.gradcam.generate_all(image_tensor, pred_idx)
+            with torch.enable_grad():
+                heatmaps = self.gradcam.generate_all(
+                    image_tensor.requires_grad_(True), pred_idx
+                )
             combined_heatmap = heatmaps.get("combined", None)
             if combined_heatmap is not None:
                 gradcam_overlay = self.gradcam.cams[
@@ -125,7 +128,10 @@ class InferencePipeline:
                 gradcam_b64 = self._encode_image(gradcam_overlay)
             else:
                 gradcam_b64 = None
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"[LEXAI] GradCAM failed: {e}")
+            traceback.print_exc()
             gradcam_b64 = None
 
         # GNN graph visualization
@@ -153,7 +159,10 @@ class InferencePipeline:
                     node_importance=node_importance,
                 )
                 gnn_viz_b64 = self._encode_image(gnn_viz)
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"[LEXAI] GNN visualization failed: {e}")
+            traceback.print_exc()
             gnn_viz_b64 = None
 
         # --- Uncertainty ---
@@ -177,7 +186,10 @@ class InferencePipeline:
                 name: float(unc_result["confidence_interval_high"][0, i])
                 for i, name in enumerate(self.config.data.class_names)
             }
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"[LEXAI] Uncertainty estimation failed: {e}")
+            traceback.print_exc()
             confidence = float(probs.max())
             is_uncertain = probs.max() < 0.7
             var_dict = {}

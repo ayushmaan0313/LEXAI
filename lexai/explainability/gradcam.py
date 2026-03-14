@@ -24,24 +24,18 @@ class GradCAM:
     def __init__(self, model: nn.Module, target_layer: nn.Module):
         self.model = model
         self.target_layer = target_layer
-        self.gradients = None
-        self.activations = None
+        self._activation = None
 
-        # Register hooks
+        # Only a FORWARD hook — no backward hook needed
         self._forward_hook = target_layer.register_forward_hook(
             self._save_activation
         )
-        self._backward_hook = target_layer.register_full_backward_hook(
-            self._save_gradient
-        )
 
     def _save_activation(self, module, input, output):
-        """Hook to capture forward activations."""
-        self.activations = output.detach()
-
-    def _save_gradient(self, module, grad_input, grad_output):
-        """Hook to capture backward gradients."""
-        self.gradients = grad_output[0].detach()
+        """Capture activations and keep them in the graph for autograd."""
+        self._activation = output
+        if output.requires_grad:
+            output.retain_grad()
 
     def generate(
         self,
@@ -51,6 +45,9 @@ class GradCAM:
         """
         Generate Grad-CAM heatmap.
 
+        Uses torch.autograd.grad instead of backward hooks to avoid
+        conflicts with inplace operations in backbone networks.
+
         Args:
             input_tensor: (1, 3, H, W) preprocessed image
             target_class: class index to explain (or None for predicted class)
@@ -59,8 +56,9 @@ class GradCAM:
             heatmap: (H, W) normalized heatmap in [0, 1]
         """
         self.model.eval()
+        self._activation = None
 
-        # Forward pass
+        # Forward pass (need gradients for the activations)
         output = self.model(input_tensor)
 
         # Handle different output formats
@@ -72,7 +70,6 @@ class GradCAM:
             logits = output
 
         if logits is None or logits.dim() < 2:
-            # Return uniform heatmap if can't compute
             h, w = input_tensor.shape[2], input_tensor.shape[3]
             return np.ones((h, w), dtype=np.float32) * 0.5
 
@@ -80,20 +77,25 @@ class GradCAM:
         if target_class is None:
             target_class = logits.argmax(dim=1).item()
 
-        # Backward pass for target class
-        self.model.zero_grad()
         score = logits[0, target_class]
-        score.backward(retain_graph=True)
 
-        if self.gradients is None or self.activations is None:
+        # Compute gradients w.r.t activations using autograd.grad
+        # This avoids backward hooks entirely
+        if self._activation is None or not self._activation.requires_grad:
             h, w = input_tensor.shape[2], input_tensor.shape[3]
             return np.ones((h, w), dtype=np.float32) * 0.5
 
+        grads = torch.autograd.grad(
+            score, self._activation,
+            retain_graph=True, create_graph=False
+        )[0]
+
         # Compute weights: global average pooling of gradients
-        weights = self.gradients.mean(dim=[2, 3], keepdim=True)  # (1, C, 1, 1)
+        weights = grads.mean(dim=[2, 3], keepdim=True)  # (1, C, 1, 1)
 
         # Weighted combination of activation maps
-        cam = (weights * self.activations).sum(dim=1, keepdim=True)  # (1, 1, h, w)
+        activations = self._activation.detach()
+        cam = (weights.detach() * activations).sum(dim=1, keepdim=True)  # (1, 1, h, w)
         cam = F.relu(cam)  # Only positive contributions
 
         # Resize to input spatial dimensions
@@ -151,7 +153,6 @@ class GradCAM:
     def release(self):
         """Remove hooks."""
         self._forward_hook.remove()
-        self._backward_hook.remove()
 
     def __del__(self):
         try:
