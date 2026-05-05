@@ -86,6 +86,11 @@ class MetricsCalculator:
 
         if probs is not None and len(probs) > 0:
             probs_np = np.array(probs)
+            if np.any(np.isnan(probs_np)):
+                probs_np = np.nan_to_num(probs_np, nan=1.0 / len(self.class_names))
+                row_sums = probs_np.sum(axis=1, keepdims=True)
+                row_sums[row_sums == 0] = 1.0
+                probs_np = probs_np / row_sums
             results["ece"] = expected_calibration_error(probs_np, labels)
             far, eer = self._compute_far_eer(labels, probs_np)
             results["far"] = far

@@ -139,6 +139,10 @@ class Trainer:
                 loss_dict = self.criterion(predictions, targets)
                 loss = loss_dict["total_loss"]
 
+            if torch.isnan(loss) or torch.isinf(loss):
+                optimizer.zero_grad()
+                continue
+
             optimizer.zero_grad()
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(optimizer)
@@ -152,7 +156,7 @@ class Trainer:
             num_batches += 1
 
         avg_loss = total_loss / max(num_batches, 1)
-        acc = accuracy_score(all_labels, all_preds)
+        acc = accuracy_score(all_labels, all_preds) if all_labels else 0.0
         return avg_loss, acc
 
     @torch.no_grad()
@@ -334,6 +338,8 @@ class Trainer:
         print(f"Stage 2 — Full fine-tuning ({stage2_epochs} epochs)")
         print("=" * 55)
         self.model.unfreeze_backbones()
+        if self.use_amp:
+            self.scaler = GradScaler("cuda", enabled=True, init_scale=2**10)
         optimizer = self._make_optimizer(self.tc.finetune_lr)
         scheduler = CosineAnnealingLR(optimizer, T_max=stage2_epochs)
         patience_counter = 0
