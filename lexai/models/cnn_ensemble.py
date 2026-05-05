@@ -1,28 +1,43 @@
-"""CNN Ensemble: fuses EfficientNet + ResNet50 + DenseNet121 into 512-dim global features."""
+"""CNN Ensemble with learnable weighted fusion and temperature calibration."""
 
 import torch
 import torch.nn as nn
-from typing import Dict, List
+import torch.nn.functional as F
+from typing import Dict, List, Optional
 
 from lexai.config import CNNConfig, DEFAULT_CONFIG
 from lexai.models.cnn_backbone import CNNBackbone
 
 
+class TemperatureScaling(nn.Module):
+    """Learnable temperature for post-hoc confidence calibration."""
+
+    def __init__(self):
+        super().__init__()
+        self.temperature = nn.Parameter(torch.ones(1))
+
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        return logits / self.temperature.clamp(min=1e-4)
+
+
 class CNNEnsemble(nn.Module):
     """
-    Ensemble of three CNN backbones with learned attention-based fusion.
-
-    Each backbone extracts features independently. Learned attention weights
-    determine how much each backbone contributes to the final representation.
+    Ensemble of CNN backbones with learnable per-backbone fusion weights
+    and temperature calibration.
     """
 
     def __init__(self, config: CNNConfig = None):
         super().__init__()
         self.config = config or DEFAULT_CONFIG.cnn
 
-        # Create backbone models
+        active_names = [
+            n for n in self.config.backbone_names
+            if n != "vit" or self.config.use_vit
+        ]
+        self.backbone_names = active_names
+
         self.backbones = nn.ModuleDict()
-        for name in self.config.backbone_names:
+        for name in self.backbone_names:
             self.backbones[name] = CNNBackbone(
                 name=name,
                 output_dim=self.config.global_feature_dim,
@@ -30,71 +45,68 @@ class CNNEnsemble(nn.Module):
                 dropout=self.config.dropout,
             )
 
-        num_backbones = len(self.config.backbone_names)
+        num_backbones = len(self.backbone_names)
 
-        # Attention mechanism for ensemble weighting
-        self.attention = nn.Sequential(
-            nn.Linear(
-                self.config.global_feature_dim * num_backbones,
-                num_backbones * 4,
-            ),
-            nn.ReLU(inplace=True),
-            nn.Linear(num_backbones * 4, num_backbones),
-            nn.Softmax(dim=-1),
-        )
+        self.fusion_weights = nn.Parameter(torch.ones(num_backbones))
 
-        # Final projection after weighted fusion
         self.fusion_proj = nn.Sequential(
             nn.Linear(self.config.global_feature_dim, self.config.global_feature_dim),
             nn.BatchNorm1d(self.config.global_feature_dim),
             nn.ReLU(inplace=True),
         )
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            x: (B, 3, H, W) input image tensor
+        self.calibration = TemperatureScaling()
 
-        Returns:
-            dict with:
-                'global_features': (B, 512) fused feature vector
-                'backbone_features': dict of (B, 512) per-backbone features
-                'attention_weights': (B, num_backbones) learned weights
-        """
-        # Extract features from each backbone
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         backbone_feats: Dict[str, torch.Tensor] = {}
         feat_list: List[torch.Tensor] = []
 
-        for name in self.config.backbone_names:
+        for name in self.backbone_names:
             feat = self.backbones[name](x)
             backbone_feats[name] = feat
             feat_list.append(feat)
 
-        # Stack features: (B, num_backbones, dim)
         stacked = torch.stack(feat_list, dim=1)
 
-        # Compute attention weights from concatenated features
-        concat = torch.cat(feat_list, dim=-1)  # (B, num_backbones * dim)
-        attn_weights = self.attention(concat)   # (B, num_backbones)
+        w = F.softmax(self.fusion_weights, dim=0)
+        weighted = stacked * w.view(1, -1, 1)
+        fused = weighted.sum(dim=1)
 
-        # Weighted fusion
-        weighted = stacked * attn_weights.unsqueeze(-1)  # (B, N, dim)
-        fused = weighted.sum(dim=1)                       # (B, dim)
-
-        # Final projection
         global_features = self.fusion_proj(fused)
 
         return {
             "global_features": global_features,
             "backbone_features": backbone_feats,
-            "attention_weights": attn_weights,
+            "attention_weights": w.unsqueeze(0).expand(x.size(0), -1),
         }
 
     def get_target_layers(self) -> Dict[str, nn.Module]:
-        """Return the Grad-CAM target layers for each backbone."""
         return {
             name: self.backbones[name].target_layer
-            for name in self.config.backbone_names
+            for name in self.backbone_names
+            if self.backbones[name].has_spatial_target
         }
+
+    def get_fusion_weights(self) -> Dict[str, float]:
+        w = F.softmax(self.fusion_weights, dim=0).detach().cpu().tolist()
+        return dict(zip(self.backbone_names, w))
+
+    def freeze_backbones(self):
+        frozen = 0
+        for name in self.backbone_names:
+            for p in self.backbones[name].get_freezable_params():
+                p.requires_grad = False
+                frozen += 1
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        print(f"  Froze {frozen} backbone param groups. "
+              f"Trainable: {trainable:,} / {total:,}")
+
+    def unfreeze_backbones(self):
+        for p in self.parameters():
+            p.requires_grad = True
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"  Unfroze all. Trainable: {trainable:,}")
+
+    def calibration_parameters(self):
+        return self.calibration.parameters()

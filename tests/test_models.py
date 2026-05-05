@@ -72,11 +72,12 @@ class TestCNNEnsemble:
         config.cnn.pretrained = False
         model = CNNEnsemble(config.cnn)
         model.eval()
+        num_backbones = len(model.backbone_names)
         with torch.no_grad():
             out = model(dummy_image)
         assert out["global_features"].shape == (2, 512)
-        assert out["attention_weights"].shape == (2, 3)
-        assert len(out["backbone_features"]) == 3
+        assert out["attention_weights"].shape == (2, num_backbones)
+        assert len(out["backbone_features"]) == num_backbones
 
     def test_attention_weights_sum_to_one(self, dummy_image, config):
         from lexai.models.cnn_ensemble import CNNEnsemble
@@ -87,6 +88,17 @@ class TestCNNEnsemble:
             out = model(dummy_image)
         sums = out["attention_weights"].sum(dim=-1)
         assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
+    def test_ensemble_without_vit(self, dummy_image, config):
+        from lexai.models.cnn_ensemble import CNNEnsemble
+        config.cnn.pretrained = False
+        config.cnn.use_vit = False
+        model = CNNEnsemble(config.cnn)
+        model.eval()
+        assert len(model.backbone_names) == 3
+        with torch.no_grad():
+            out = model(dummy_image)
+        assert out["global_features"].shape == (2, 512)
 
 
 class TestCellSegmenter:

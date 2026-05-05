@@ -266,8 +266,8 @@ def main():
     print(f"  AML:    {counts['AML']:>6,} images → {output_dir / 'AML'}")
     print(f"  Normal: {counts['Normal']:>6,} images → {output_dir / 'Normal'}")
     print(f"\n✅ Dataset ready! Next steps:")
-    print(f"   1. Reorganize data:  py scripts/reorganize_for_aml.py --data_dir {args.output_dir}")
-    print(f"   2. Train the model:  py scripts/train.py --data_dir {args.output_dir} --preset aml --epochs 50")
+    print(f"   1. Prepare data:  python scripts/prepare_data.py --data_dir {args.output_dir} --balance")
+    print(f"   2. Train model:   python scripts/train.py --data_dir {args.output_dir} --epochs 30")
 
 
 if __name__ == "__main__":

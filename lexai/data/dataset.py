@@ -1,10 +1,14 @@
-"""Dataset loader for leukemia blood smear images."""
+"""Unified dataset loader for leukemia blood smear images."""
 
+import csv
 import os
+import platform
 import random
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -12,169 +16,213 @@ from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
 from torchvision import transforms
 
 from lexai.config import DataConfig, DEFAULT_CONFIG
+from lexai.data.preprocessing import (
+    MacenkoNormalizer,
+    get_train_transform,
+    get_inference_transform,
+)
+
+_DEFAULT_NUM_WORKERS = 0 if platform.system() == "Windows" else 4
+
+CLASS_NAMES = ["Normal", "ALL", "AML", "CML"]
+
+_FOLDER_TO_LABEL = {
+    "normal": 0, "benign": 0, "hem": 0,
+    "all": 1, "all_blast": 1, "early": 1, "pre": 1, "pro": 1,
+    "all_early_pre_b": 1, "all_pre_b": 1, "all_pro_b": 1,
+    "aml": 2,
+    "cml": 3,
+}
 
 
 class LeukemiaDataset(Dataset):
     """
     Dataset for leukemia blood smear images.
 
-    Expects directory structure:
-        data_dir/
-            ALL_Blast/
-            ALL_Early_Pre_B/
-            ALL_Pre_B/
-            ALL_Pro_B/
-            Benign/
+    Supports two modes:
+    - Directory scanning: data_dir/{Normal,ALL,AML,CML}/**/*.{jpg,png,...}
+    - CSV manifest: path,label per line
     """
 
     def __init__(
         self,
-        data_dir: str,
-        config: DataConfig = None,
-        transform: Optional[transforms.Compose] = None,
-        split: str = "train",
+        image_paths: List[str],
+        labels: List[int],
+        transform=None,
+        normalizer: Optional[MacenkoNormalizer] = None,
     ):
-        self.data_dir = Path(data_dir)
-        self.config = config or DEFAULT_CONFIG.data
-        self.split = split
-        self.samples: List[Tuple[str, int]] = []  # (image_path, label)
-        self.class_to_idx: Dict[str, int] = {}
-
-        # Build class mapping
-        for idx, class_name in enumerate(self.config.class_names):
-            self.class_to_idx[class_name] = idx
-
-        # Scan directories
-        self._load_samples()
-
-        # Set up transforms
-        if transform is not None:
-            self.transform = transform
-        else:
-            self.transform = self._default_transform()
-
-    def _load_samples(self):
-        """Scan class directories and collect image paths."""
-        valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
-
-        for class_name, class_idx in self.class_to_idx.items():
-            class_dir = self.data_dir / class_name
-            if not class_dir.exists():
-                continue
-
-            for img_path in sorted(class_dir.iterdir()):
-                if img_path.suffix.lower() in valid_extensions:
-                    self.samples.append((str(img_path), class_idx))
-
-    def _default_transform(self) -> transforms.Compose:
-        """Build augmentation pipeline — aggressive for training to prevent overfitting."""
-        size = self.config.image_size
-
-        if self.split == "train" and self.config.augmentation:
-            return transforms.Compose([
-                # RandomResizedCrop forces model to learn from partial views
-                transforms.RandomResizedCrop(
-                    size, scale=(0.6, 1.0), ratio=(0.8, 1.2)
-                ),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomRotation(degrees=30),
-                # Stronger color jitter to generalize across staining
-                transforms.ColorJitter(
-                    brightness=0.4, contrast=0.4,
-                    saturation=0.4, hue=0.1
-                ),
-                transforms.RandomAffine(
-                    degrees=15, translate=(0.1, 0.1), scale=(0.85, 1.15),
-                    shear=10,
-                ),
-                # Gaussian blur for robustness to focus
-                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
-                transforms.ToTensor(),
-                # Random erasing forces model to use global features
-                transforms.RandomErasing(
-                    p=0.3, scale=(0.02, 0.15), ratio=(0.3, 3.3)
-                ),
-                transforms.Normalize(
-                    mean=self.config.mean, std=self.config.std
-                ),
-            ])
-        else:
-            return transforms.Compose([
-                transforms.Resize(size),
-                transforms.CenterCrop(size),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=self.config.mean, std=self.config.std
-                ),
-            ])
+        self.image_paths = image_paths
+        self.labels = labels
+        self.transform = transform
+        self.normalizer = normalizer
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.image_paths)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, str]:
-        """
-        Returns:
-            image: Tensor of shape (3, H, W)
-            label: int class label
-            path: original image path (for explainability tracing)
-        """
-        img_path, label = self.samples[idx]
-        image = Image.open(img_path).convert("RGB")
-        image = self.transform(image)
-        return image, label, img_path
+        img_path = self.image_paths[idx]
+        image = cv2.imread(str(img_path))
+
+        if image is None:
+            warnings.warn(f"Could not read image: {img_path} — using blank")
+            image = np.zeros((256, 256, 3), dtype=np.uint8)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        if self.normalizer is not None:
+            try:
+                image = self.normalizer.transform(image)
+            except Exception:
+                pass
+
+        pil_image = Image.fromarray(image)
+        if self.transform:
+            image = self.transform(pil_image)
+        else:
+            image = transforms.ToTensor()(pil_image)
+
+        return image, self.labels[idx], img_path
 
 
-def compute_class_weights(
-    samples: List[Tuple[str, int]],
-    num_classes: int,
-) -> torch.Tensor:
-    """Compute inverse-frequency class weights for balanced training."""
+def scan_directory(
+    data_dir: str,
+    config: DataConfig = None,
+) -> Tuple[List[str], List[int]]:
+    """
+    Scan a directory tree for images, mapping folder names to class labels.
+
+    Handles various folder naming conventions (case-insensitive):
+    - Normal/Benign/HEM -> 0
+    - ALL/ALL_Blast/Early/Pre/Pro -> 1
+    - AML -> 2
+    - CML -> 3
+    """
+    config = config or DEFAULT_CONFIG.data
+    valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
+    image_paths = []
+    labels = []
+
+    data_path = Path(data_dir)
+    if not data_path.exists():
+        return image_paths, labels
+
+    for subdir in sorted(data_path.iterdir()):
+        if not subdir.is_dir():
+            continue
+
+        folder_name = subdir.name.lower()
+        label = _FOLDER_TO_LABEL.get(folder_name)
+
+        if label is None:
+            for key, val in _FOLDER_TO_LABEL.items():
+                if key in folder_name:
+                    label = val
+                    break
+
+        if label is None:
+            continue
+
+        for img_path in sorted(subdir.rglob("*")):
+            if img_path.suffix.lower() in valid_extensions:
+                image_paths.append(str(img_path))
+                labels.append(label)
+
+    return image_paths, labels
+
+
+def load_from_manifest(csv_path: str) -> Tuple[List[str], List[int]]:
+    """Load dataset from a CSV manifest (path,label per line)."""
+    image_paths = []
+    labels = []
+    with open(csv_path, newline="") as f:
+        for row in csv.reader(f):
+            if len(row) >= 2:
+                image_paths.append(row[0])
+                labels.append(int(row[1]))
+    return image_paths, labels
+
+
+def save_manifest(image_paths: List[str], labels: List[int], path: str):
+    """Save a CSV manifest for reproducibility."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        for p, l in zip(image_paths, labels):
+            writer.writerow([p, l])
+
+
+def compute_class_weights(labels: List[int], num_classes: int) -> torch.Tensor:
     counts = torch.zeros(num_classes)
-    for _, label in samples:
+    for label in labels:
         counts[label] += 1
-
-    # Inverse frequency, normalized to sum=num_classes
     weights = 1.0 / (counts + 1e-6)
     weights = weights / weights.sum() * num_classes
     return weights
 
 
+def fit_stain_normalizer(image_paths: List[str], n_ref: int = 50) -> MacenkoNormalizer:
+    """Fit a Macenko normalizer on a sample of training images."""
+    normalizer = MacenkoNormalizer()
+    ref_images = []
+    ref_size = (256, 256)
+
+    for p in image_paths[:n_ref]:
+        img = cv2.imread(p)
+        if img is not None:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_rgb = cv2.resize(img_rgb, ref_size)
+            ref_images.append(img_rgb)
+
+    if ref_images:
+        ref = np.median(np.stack(ref_images), axis=0).astype(np.uint8)
+        normalizer.fit(ref)
+        print("  MacenkoNormalizer fitted on training set")
+
+    return normalizer
+
+
 def create_data_loaders(
     data_dir: str,
     config: DataConfig = None,
-    batch_size: int = 8,
-    num_workers: int = 0,
+    batch_size: int = 16,
+    num_workers: int = _DEFAULT_NUM_WORKERS,
     seed: int = 42,
-    use_weighted_sampler: bool = True,
+    manifest_csv: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Create train/val/test data loaders with stratified splitting
-    and class-balanced sampling.
-
-    Returns:
-        (train_loader, val_loader, test_loader)
+    Create train/val/test data loaders with stratified splitting,
+    optional stain normalization, and class-balanced sampling.
     """
     config = config or DEFAULT_CONFIG.data
 
-    # Load full dataset (no augmentation for splitting)
-    full_dataset = LeukemiaDataset(data_dir, config, split="train")
+    if manifest_csv and os.path.isfile(manifest_csv):
+        image_paths, labels = load_from_manifest(manifest_csv)
+    else:
+        image_paths, labels = scan_directory(data_dir, config)
 
-    if len(full_dataset) == 0:
+    if not image_paths:
         raise ValueError(
             f"No images found in {data_dir}. "
-            f"Expected subdirectories: {config.class_names}"
+            f"Expected subdirectories matching: {list(_FOLDER_TO_LABEL.keys())}"
         )
+
+    # Print class distribution
+    class_counts = {}
+    for l in labels:
+        name = config.class_names[l] if l < len(config.class_names) else f"class_{l}"
+        class_counts[name] = class_counts.get(name, 0) + 1
+    print(f"\n  Dataset: {len(image_paths)} images")
+    for name, count in sorted(class_counts.items()):
+        print(f"    {name:12s}: {count:>6}")
 
     # Stratified split
     indices_per_class: Dict[int, List[int]] = {}
-    for idx, (_, label) in enumerate(full_dataset.samples):
+    for idx, label in enumerate(labels):
         indices_per_class.setdefault(label, []).append(idx)
 
     rng = random.Random(seed)
     train_indices, val_indices, test_indices = [], [], []
 
-    print("\n  Class distribution:")
     for cls_idx, indices in sorted(indices_per_class.items()):
         rng.shuffle(indices)
         n = len(indices)
@@ -182,48 +230,48 @@ def create_data_loaders(
         n_val = int(n * config.val_split)
 
         train_indices.extend(indices[:n_train])
-        val_indices.extend(indices[n_train:n_train + n_val])
-        test_indices.extend(indices[n_train + n_val:])
+        val_indices.extend(indices[n_train : n_train + n_val])
+        test_indices.extend(indices[n_train + n_val :])
 
-        cls_name = config.class_names[cls_idx] if cls_idx < len(config.class_names) else f"class_{cls_idx}"
-        print(f"    {cls_name:20s}: {n:>6} total | "
-              f"{n_train:>5} train | {n_val:>4} val | {n - n_train - n_val:>4} test")
+    # Split paths/labels
+    train_paths = [image_paths[i] for i in train_indices]
+    train_labels = [labels[i] for i in train_indices]
+    val_paths = [image_paths[i] for i in val_indices]
+    val_labels = [labels[i] for i in val_indices]
+    test_paths = [image_paths[i] for i in test_indices]
+    test_labels = [labels[i] for i in test_indices]
 
-    # Create split datasets with appropriate transforms
-    train_ds = LeukemiaDataset(data_dir, config, split="train")
-    val_ds = LeukemiaDataset(data_dir, config, split="val")
-    test_ds = LeukemiaDataset(data_dir, config, split="test")
+    print(f"  Split: {len(train_paths)} train / {len(val_paths)} val / {len(test_paths)} test")
 
-    # Weighted sampler for balanced training batches
+    # Stain normalization
+    normalizer = None
+    if config.use_stain_norm:
+        normalizer = fit_stain_normalizer(train_paths)
+
+    # Transforms
+    train_transform = get_train_transform(config)
+    val_transform = get_inference_transform(config)
+
+    train_ds = LeukemiaDataset(train_paths, train_labels, train_transform, normalizer)
+    val_ds = LeukemiaDataset(val_paths, val_labels, val_transform, normalizer)
+    test_ds = LeukemiaDataset(test_paths, test_labels, val_transform, normalizer)
+
+    # Weighted sampler
     sampler = None
     shuffle = True
-    if use_weighted_sampler:
-        # Compute per-sample weights based on class frequency
-        class_counts = {}
-        for i in train_indices:
-            _, label = full_dataset.samples[i]
-            class_counts[label] = class_counts.get(label, 0) + 1
-
-        sample_weights = []
-        for i in train_indices:
-            _, label = full_dataset.samples[i]
-            # Weight = 1 / class_count (so rare classes are sampled more)
-            sample_weights.append(1.0 / class_counts[label])
-
+    if config.num_classes > 1:
+        class_counts_train = np.bincount(train_labels, minlength=config.num_classes)
+        sample_weights = [1.0 / (class_counts_train[l] + 1e-6) for l in train_labels]
         sampler = WeightedRandomSampler(
             weights=sample_weights,
-            num_samples=len(train_indices),
+            num_samples=len(train_labels),
             replacement=True,
         )
-        shuffle = False  # Sampler and shuffle are mutually exclusive
-        print(f"\n  Using WeightedRandomSampler for class balance")
-        for cls_idx in sorted(class_counts.keys()):
-            cls_name = config.class_names[cls_idx]
-            w = 1.0 / class_counts[cls_idx]
-            print(f"    {cls_name:20s}: count={class_counts[cls_idx]:>5}  weight={w:.6f}")
+        shuffle = False
+        print("  Using WeightedRandomSampler for class balance")
 
     train_loader = DataLoader(
-        Subset(train_ds, train_indices),
+        train_ds,
         batch_size=batch_size,
         shuffle=shuffle,
         sampler=sampler,
@@ -232,14 +280,14 @@ def create_data_loaders(
         drop_last=True,
     )
     val_loader = DataLoader(
-        Subset(val_ds, val_indices),
+        val_ds,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
     )
     test_loader = DataLoader(
-        Subset(test_ds, test_indices),
+        test_ds,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,

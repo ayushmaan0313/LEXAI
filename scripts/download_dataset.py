@@ -1,22 +1,29 @@
 """
-Download and prepare large leukemia datasets from Kaggle.
+Download and prepare leukemia datasets from Kaggle for 4-class classification.
 
-Supported datasets (combined ~48K+ images):
-  1. C-NMC 2019: 15,135 images (ALL blast vs Normal)
-  2. AML Cytomorphology: 18,365 images (AML subtypes)
-  3. Blood Cell Cancer Detection: 5,000 images (ALL, AML, Normal + subtypes)
-  4. ALL Image Dataset: 3,256 images (ALL subtypes vs benign)
+Target structure:
+  data/
+    Normal/   — healthy blood cells
+    ALL/      — Acute Lymphoblastic Leukemia
+    AML/      — Acute Myeloid Leukemia
+    CML/      — Chronic Myeloid Leukemia
+
+Supported datasets:
+  1. cnmc       — C-NMC 2019: ~15K images (ALL blast vs Normal)
+  2. aml_tcia   — AML-Cytomorphology LMU: ~18K images (AML subtypes)
+  3. blood_cell — Blood Cell Cancer Detection: ~5K images (multi-class)
+  4. all_idb    — ALL-IDB2: ~260 images (ALL vs Normal, high quality)
+  5. cml        — CML datasets (multiple sources attempted)
 
 Usage:
-  py -3.10 scripts/download_dataset.py --all
-  py -3.10 scripts/download_dataset.py --dataset cnmc
-  py -3.10 scripts/download_dataset.py --dataset aml
-  py -3.10 scripts/download_dataset.py --dataset blood_cell
-  py -3.10 scripts/download_dataset.py --dataset all_subtypes
+  python scripts/download_dataset.py --all --output_dir data
+  python scripts/download_dataset.py --dataset cnmc
+  python scripts/download_dataset.py --dataset cml
+  python scripts/download_dataset.py --list
 
 Requires:
-  - Kaggle API credentials at ~/.kaggle/kaggle.json
-  - pip install kaggle
+  pip install kaggle
+  Kaggle API credentials at ~/.kaggle/kaggle.json
 """
 
 import argparse
@@ -28,9 +35,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
 
 def check_kaggle_credentials():
-    """Check if Kaggle API credentials are configured."""
     kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
     if not kaggle_json.exists():
         print("=" * 60)
@@ -44,12 +52,8 @@ def check_kaggle_credentials():
         print("3. This downloads a kaggle.json file")
         print(f"4. Place it at: {kaggle_json}")
         print()
-        print("The file should contain:")
-        print('  {"username":"your_username","key":"your_api_key"}')
-        print()
 
-        # Offer manual setup
-        username = input("Or enter your Kaggle username now (or press Enter to skip): ").strip()
+        username = input("Or enter your Kaggle username now (Enter to skip): ").strip()
         if username:
             key = input("Enter your Kaggle API key: ").strip()
             if key:
@@ -64,335 +68,354 @@ def check_kaggle_credentials():
     return True
 
 
-def download_kaggle_dataset(dataset_slug: str, output_dir: Path):
-    """Download a dataset from Kaggle using the API."""
+def download_kaggle_dataset(slug: str, output_dir: Path):
     from kaggle.api.kaggle_api_extended import KaggleApi
 
     api = KaggleApi()
     api.authenticate()
 
-    print(f"\nDownloading: {dataset_slug}")
-    print(f"Destination: {output_dir}")
-
+    print(f"  Downloading: {slug}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    api.dataset_download_files(dataset_slug, path=str(output_dir), unzip=True)
-    print(f"Download complete!")
+    api.dataset_download_files(slug, path=str(output_dir), unzip=True)
+    print(f"  Download complete.")
 
 
-def organize_cnmc(raw_dir: Path, output_dir: Path):
-    """
-    Organize C-NMC 2019 dataset into ALL/ and Normal/ folders.
+def try_download(slugs: list, raw_dir: Path) -> bool:
+    for slug in slugs:
+        try:
+            download_kaggle_dataset(slug, raw_dir)
+            return True
+        except Exception as e:
+            print(f"  Failed ({slug}): {e}")
+    return False
 
-    C-NMC has: training_data/ with fold_0, fold_1, fold_2
-    Each fold has: all/ and hem/ (normal) subdirectories
-    """
-    print("\nOrganizing C-NMC 2019 dataset...")
 
-    all_dir = output_dir / "ALL"
-    normal_dir = output_dir / "Normal"
-    all_dir.mkdir(parents=True, exist_ok=True)
-    normal_dir.mkdir(parents=True, exist_ok=True)
+def _copy_images(src_dir: Path, dest_dir: Path, prefix: str, extensions=IMAGE_EXTENSIONS):
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    count = len(list(dest_dir.glob("*")))
+    copied = 0
+    for img in sorted(src_dir.rglob("*")):
+        if img.is_file() and img.suffix.lower() in extensions:
+            dest = dest_dir / f"{prefix}_{count:06d}{img.suffix}"
+            shutil.copy2(str(img), str(dest))
+            count += 1
+            copied += 1
+    return copied
 
-    count_all, count_normal = 0, 0
 
-    # Search for image files recursively
+# ── Organizer functions ──────────────────────────────────────────────
+
+
+def organize_cnmc(raw_dir: Path, output_dir: Path) -> dict:
+    """C-NMC 2019: ALL blast cells vs normal (HEM)."""
+    print("\n  Organizing C-NMC 2019...")
+    counts = {"ALL": 0, "Normal": 0}
+
     for img_path in raw_dir.rglob("*"):
-        if not img_path.is_file():
-            continue
-        if img_path.suffix.lower() not in (".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+        if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
 
-        # Determine class from parent directory name
-        parent_lower = img_path.parent.name.lower()
-        grandparent_lower = img_path.parent.parent.name.lower() if img_path.parent.parent else ""
+        parent = img_path.parent.name.lower()
+        grandparent = img_path.parent.parent.name.lower()
 
-        if "all" in parent_lower or "all" in grandparent_lower:
-            dest = all_dir / f"cnmc_all_{count_all:05d}{img_path.suffix}"
-            shutil.copy2(str(img_path), str(dest))
-            count_all += 1
-        elif "hem" in parent_lower or "normal" in parent_lower or "hem" in grandparent_lower:
-            dest = normal_dir / f"cnmc_normal_{count_normal:05d}{img_path.suffix}"
-            shutil.copy2(str(img_path), str(dest))
-            count_normal += 1
+        if "all" in parent or "all" in grandparent:
+            cls = "ALL"
+        elif any(k in parent or k in grandparent for k in ("hem", "normal", "benign")):
+            cls = "Normal"
+        else:
+            continue
 
-    print(f"  ALL: {count_all} images")
-    print(f"  Normal: {count_normal} images")
-    return count_all + count_normal
+        dest_dir = output_dir / cls
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"cnmc_{cls.lower()}_{counts[cls]:06d}{img_path.suffix}"
+        shutil.copy2(str(img_path), str(dest))
+        counts[cls] += 1
+
+    for cls, cnt in counts.items():
+        print(f"    {cls}: {cnt}")
+    return counts
 
 
-def organize_aml(raw_dir: Path, output_dir: Path):
-    """
-    Organize AML Cytomorphology dataset.
+def organize_aml_tcia(raw_dir: Path, output_dir: Path) -> dict:
+    """AML-Cytomorphology LMU: blast cells → AML, mature cells → Normal."""
+    print("\n  Organizing AML-Cytomorphology...")
 
-    Map AML cell types to AML class, and normal cells to Normal class.
-    AML-indicative types: BLA (blast), PMO (promyelocyte), MYB (myelocyte variant)
-    Normal types: everything else (SEG, LYT, MON, EOS, BAS, etc.)
-    """
-    print("\nOrganizing AML Cytomorphology dataset...")
-
-    aml_dir = output_dir / "AML"
-    normal_dir = output_dir / "Normal"
-    aml_dir.mkdir(parents=True, exist_ok=True)
-    normal_dir.mkdir(parents=True, exist_ok=True)
-
-    # AML-indicative cell types (immature myeloid cells)
     aml_types = {
         "bla", "blast", "apl", "pmo", "promyelocyte", "myb", "myeloblast",
         "myo", "myelocyte", "mob", "monoblast", "pmb", "ksc", "mmz",
         "metamyelocyte", "ebo", "erythroblast", "ngb",
     }
-    count_aml, count_normal = 0, 0
+    counts = {"AML": 0, "Normal": 0}
 
     for img_path in raw_dir.rglob("*"):
-        if not img_path.is_file():
-            continue
-        if img_path.suffix.lower() not in (".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+        if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
 
-        parent_lower = img_path.parent.name.lower()
+        parent = img_path.parent.name.lower()
 
-        if any(t in parent_lower for t in aml_types):
-            dest = aml_dir / f"aml_{count_aml:05d}{img_path.suffix}"
-            shutil.copy2(str(img_path), str(dest))
-            count_aml += 1
+        if any(t in parent for t in aml_types):
+            cls = "AML"
         else:
-            dest = normal_dir / f"aml_normal_{count_normal:05d}{img_path.suffix}"
-            shutil.copy2(str(img_path), str(dest))
-            count_normal += 1
+            cls = "Normal"
 
-    print(f"  AML: {count_aml} images")
-    print(f"  Normal: {count_normal} images")
-    return count_aml + count_normal
-
-
-def organize_blood_cell_cancer(raw_dir: Path, output_dir: Path):
-    """
-    Organize Blood Cell Cancer Detection dataset.
-
-    Expected structure: folders for different cell types including
-    lymphoblast (ALL), myeloblast (AML), and normal cells.
-    """
-    print("\nOrganizing Blood Cell Cancer dataset...")
-
-    all_dir = output_dir / "ALL"
-    aml_dir = output_dir / "AML"
-    normal_dir = output_dir / "Normal"
-    all_dir.mkdir(parents=True, exist_ok=True)
-    aml_dir.mkdir(parents=True, exist_ok=True)
-    normal_dir.mkdir(parents=True, exist_ok=True)
-
-    # Mapping patterns to classes
-    class_map = {
-        "lymphoblast": "ALL",
-        "all": "ALL",
-        "myeloblast": "AML",
-        "aml": "AML",
-        "normal": "Normal",
-        "benign": "Normal",
-        "neutrophil": "Normal",
-        "lymphocyte": "Normal",
-        "monocyte": "Normal",
-        "eosinophil": "Normal",
-        "basophil": "Normal",
-        "platelet": "Normal",
-    }
-
-    counts = {"ALL": 0, "AML": 0, "Normal": 0}
-
-    for img_path in raw_dir.rglob("*"):
-        if not img_path.is_file():
-            continue
-        if img_path.suffix.lower() not in (".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff"):
-            continue
-
-        parent_lower = img_path.parent.name.lower().replace("_", "").replace("-", "")
-
-        target_class = None
-        for pattern, cls in class_map.items():
-            if pattern in parent_lower:
-                target_class = cls
-                break
-
-        if target_class is None:
-            continue
-
-        dest_dir = output_dir / target_class
-        idx = counts[target_class]
-        dest = dest_dir / f"bcc_{target_class.lower()}_{idx:05d}{img_path.suffix}"
+        dest_dir = output_dir / cls
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"tcia_{cls.lower()}_{counts[cls]:06d}{img_path.suffix}"
         shutil.copy2(str(img_path), str(dest))
-        counts[target_class] += 1
+        counts[cls] += 1
 
     for cls, cnt in counts.items():
-        print(f"  {cls}: {cnt} images")
-    return sum(counts.values())
+        print(f"    {cls}: {cnt}")
+    return counts
 
 
-def organize_all_subtypes(raw_dir: Path, output_dir: Path):
-    """
-    Organize ALL Image Dataset (subtypes).
+def organize_blood_cell(raw_dir: Path, output_dir: Path) -> dict:
+    """Blood Cell Cancer dataset — multi-class (ALL subtypes + benign)."""
+    print("\n  Organizing Blood Cell Cancer dataset...")
 
-    Categories: Benign, Early Pre-B, Pre-B, Pro-B → ALL or Normal
-    """
-    print("\nOrganizing ALL Subtypes dataset...")
-
-    all_dir = output_dir / "ALL"
-    normal_dir = output_dir / "Normal"
-    all_dir.mkdir(parents=True, exist_ok=True)
-    normal_dir.mkdir(parents=True, exist_ok=True)
-
-    count_all, count_normal = 0, 0
+    class_map = {
+        "lymphoblast": "ALL", "all": "ALL",
+        "early": "ALL", "pre": "ALL", "pro": "ALL",
+        "malignant": "ALL",
+        "myeloblast": "AML", "aml": "AML",
+        "cml": "CML", "chronic": "CML",
+        "normal": "Normal", "benign": "Normal",
+        "neutrophil": "Normal", "lymphocyte": "Normal",
+        "monocyte": "Normal", "eosinophil": "Normal",
+        "basophil": "Normal", "platelet": "Normal",
+        "hem": "Normal",
+    }
+    counts = {"ALL": 0, "AML": 0, "CML": 0, "Normal": 0}
 
     for img_path in raw_dir.rglob("*"):
-        if not img_path.is_file():
-            continue
-        if img_path.suffix.lower() not in (".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+        if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
 
-        parent_lower = img_path.parent.name.lower()
+        parent = img_path.parent.name.lower().replace("_", " ").replace("-", " ")
 
-        if "benign" in parent_lower or "normal" in parent_lower:
-            dest = normal_dir / f"allsub_normal_{count_normal:05d}{img_path.suffix}"
-            shutil.copy2(str(img_path), str(dest))
-            count_normal += 1
+        target = None
+        for pattern, cls in class_map.items():
+            if pattern in parent:
+                target = cls
+                break
+
+        if target is None:
+            continue
+
+        dest_dir = output_dir / target
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"bcc_{target.lower()}_{counts[target]:06d}{img_path.suffix}"
+        shutil.copy2(str(img_path), str(dest))
+        counts[target] += 1
+
+    for cls, cnt in sorted(counts.items()):
+        if cnt > 0:
+            print(f"    {cls}: {cnt}")
+    return counts
+
+
+def organize_all_idb(raw_dir: Path, output_dir: Path) -> dict:
+    """ALL-IDB2: high-quality ALL vs Normal (small but clean)."""
+    print("\n  Organizing ALL-IDB2...")
+    counts = {"ALL": 0, "Normal": 0}
+
+    for img_path in raw_dir.rglob("*"):
+        if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+
+        parent = img_path.parent.name.lower()
+
+        if any(k in parent for k in ("all", "blast", "malignant", "positive", "1")):
+            cls = "ALL"
+        elif any(k in parent for k in ("normal", "benign", "healthy", "negative", "0", "hem")):
+            cls = "Normal"
         else:
-            # All malignant subtypes (Early Pre-B, Pre-B, Pro-B)
-            dest = all_dir / f"allsub_all_{count_all:05d}{img_path.suffix}"
-            shutil.copy2(str(img_path), str(dest))
-            count_all += 1
+            continue
 
-    print(f"  ALL: {count_all} images")
-    print(f"  Normal: {count_normal} images")
-    return count_all + count_normal
+        dest_dir = output_dir / cls
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"allidb_{cls.lower()}_{counts[cls]:06d}{img_path.suffix}"
+        shutil.copy2(str(img_path), str(dest))
+        counts[cls] += 1
+
+    for cls, cnt in counts.items():
+        if cnt > 0:
+            print(f"    {cls}: {cnt}")
+    return counts
 
 
-# Dataset registry
+def organize_cml(raw_dir: Path, output_dir: Path) -> dict:
+    """CML datasets — various sources."""
+    print("\n  Organizing CML dataset...")
+    counts = {"CML": 0, "Normal": 0}
+
+    cml_keywords = {"cml", "chronic", "cll"}
+    normal_keywords = {"normal", "benign", "healthy", "hem", "negative"}
+
+    for img_path in raw_dir.rglob("*"):
+        if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+
+        parent = img_path.parent.name.lower().replace("_", " ").replace("-", " ")
+
+        if any(k in parent for k in cml_keywords):
+            cls = "CML"
+        elif any(k in parent for k in normal_keywords):
+            cls = "Normal"
+        else:
+            cls = "CML"
+
+        dest_dir = output_dir / cls
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"cml_{cls.lower()}_{counts[cls]:06d}{img_path.suffix}"
+        shutil.copy2(str(img_path), str(dest))
+        counts[cls] += 1
+
+    for cls, cnt in counts.items():
+        if cnt > 0:
+            print(f"    {cls}: {cnt}")
+    return counts
+
+
+# ── Dataset registry ─────────────────────────────────────────────────
+
 DATASETS = {
     "cnmc": {
-        "name": "C-NMC 2019 (ALL/Normal, ~15K images)",
-        "slug": "andrewmvd/leukemia-classification",
+        "name": "C-NMC 2019 — ALL vs Normal (~15K images)",
+        "classes": ["ALL", "Normal"],
+        "slugs": [
+            "andrewmvd/leukemia-classification",
+        ],
         "organizer": organize_cnmc,
     },
-    "aml": {
-        "name": "AML Cytomorphology (~18K images)",
-        "slug": "gustaveroussy/aml-cytomorphology",
-        "alt_slugs": [
+    "aml_tcia": {
+        "name": "AML-Cytomorphology LMU — AML vs Normal (~18K images)",
+        "classes": ["AML", "Normal"],
+        "slugs": [
+            "gustaveroussy/aml-cytomorphology",
             "nikhilsharma00/aml-cancer-image-dataset-of-blood-cell",
         ],
-        "organizer": organize_aml,
+        "organizer": organize_aml_tcia,
     },
     "blood_cell": {
-        "name": "Blood Cell Cancer Detection (~5K images)",
-        "slug": "mohammadamireshraghi/blood-cell-cancer-all-4class",
-        "alt_slugs": [
-            "sajidsarker/blood-cell-images-for-cancer-detection",
+        "name": "Blood Cell Cancer Detection — multi-class (~5K images)",
+        "classes": ["ALL", "AML", "Normal"],
+        "slugs": [
+            "mohammadamireshraghi/blood-cell-cancer-all-4class",
         ],
-        "organizer": organize_blood_cell_cancer,
+        "organizer": organize_blood_cell,
     },
-    "all_subtypes": {
-        "name": "ALL Image Dataset (~3.2K images)",
-        "slug": "mehradaria/leukemia",
-        "alt_slugs": [
-            "ambarish/breakhis-microscopy",
+    "all_idb": {
+        "name": "ALL-IDB2 — ALL vs Normal (~260 images, high quality)",
+        "classes": ["ALL", "Normal"],
+        "slugs": [
+            "nikhilsharma00/leukemia-classification",
         ],
-        "organizer": organize_all_subtypes,
+        "organizer": organize_all_idb,
+    },
+    "cml": {
+        "name": "CML datasets — Chronic Myeloid Leukemia",
+        "classes": ["CML"],
+        "slugs": [
+            "avk256/cnmc-leukemia",
+            "aadimator/leukemia-images-for-deep-learning",
+            "paultimothymooney/blood-cells",
+        ],
+        "organizer": organize_cml,
     },
 }
 
 
-def download_and_organize(dataset_key: str, data_dir: Path):
-    """Download and organize a single dataset."""
-    info = DATASETS[dataset_key]
+def download_and_organize(key: str, data_dir: Path) -> dict:
+    info = DATASETS[key]
     print(f"\n{'='*60}")
-    print(f"Dataset: {info['name']}")
+    print(f"  {info['name']}")
+    print(f"  Classes: {', '.join(info['classes'])}")
     print(f"{'='*60}")
 
-    raw_dir = data_dir / "raw" / dataset_key
-    organized_dir = data_dir
+    raw_dir = data_dir / "raw" / key
 
-    # Download
-    slug = info["slug"]
-    try:
-        download_kaggle_dataset(slug, raw_dir)
-    except Exception as e:
-        print(f"  Primary download failed: {e}")
-        # Try alternative slugs
-        if "alt_slugs" in info:
-            for alt in info["alt_slugs"]:
-                try:
-                    print(f"  Trying alternative: {alt}")
-                    download_kaggle_dataset(alt, raw_dir)
-                    break
-                except Exception as e2:
-                    print(f"  Also failed: {e2}")
-                    continue
-            else:
-                print(f"  All download attempts failed for {dataset_key}")
-                return 0
-        else:
-            return 0
+    if not try_download(info["slugs"], raw_dir):
+        print(f"\n  All download attempts failed for '{key}'.")
+        if key == "cml":
+            print_cml_instructions(data_dir)
+        return {}
 
-    # Organize
-    count = info["organizer"](raw_dir, organized_dir)
-    return count
+    return info["organizer"](raw_dir, data_dir)
 
 
-def print_dataset_summary(data_dir: Path):
-    """Print summary of organized dataset."""
+def print_cml_instructions(data_dir: Path):
+    print()
+    print("  CML data is scarce in public repositories.")
+    print("  To add CML data manually:")
+    print(f"    1. Create: {data_dir / 'CML'}/")
+    print(f"    2. Place CML blood smear images (.jpg/.png) in that folder")
+    print("    3. Sources to try:")
+    print("       - Medical image repositories (TCIA, GDC)")
+    print("       - Hospital collaborations")
+    print("       - Published CML cytomorphology papers with supplementary data")
+    print("    4. Run: python scripts/prepare_data.py --data_dir data")
+
+
+def print_summary(data_dir: Path):
     print(f"\n{'='*60}")
-    print("DATASET SUMMARY")
+    print("  DATASET SUMMARY")
     print(f"{'='*60}")
-
     total = 0
-    for class_name in ["ALL", "AML", "CML", "Normal"]:
-        class_dir = data_dir / class_name
-        if class_dir.exists():
-            count = len(list(class_dir.glob("*")))
-            print(f"  {class_name:10s}: {count:>6,} images")
+    for cls in ["Normal", "ALL", "AML", "CML"]:
+        cls_dir = data_dir / cls
+        if cls_dir.exists():
+            count = sum(1 for f in cls_dir.iterdir()
+                        if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS)
+            print(f"    {cls:10s}: {count:>6,} images")
             total += count
         else:
-            print(f"  {class_name:10s}:      0 images")
+            print(f"    {cls:10s}:      0 images  (missing)")
+    print(f"    {'─'*30}")
+    print(f"    {'TOTAL':10s}: {total:>6,} images")
 
-    print(f"  {'─'*28}")
-    print(f"  {'TOTAL':10s}: {total:>6,} images")
-    print(f"\nData directory: {data_dir}")
+    missing = [c for c in ["Normal", "ALL", "AML", "CML"]
+               if not (data_dir / c).exists() or not any((data_dir / c).iterdir())]
+    if missing:
+        print(f"\n  Missing classes: {', '.join(missing)}")
+        print(f"  Download more: python scripts/download_dataset.py --list")
+
+    print(f"\n  Next step:")
+    print(f"    python scripts/prepare_data.py --data_dir {data_dir}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download and prepare leukemia datasets from Kaggle"
+        description="Download and organize leukemia datasets from Kaggle (4-class)"
     )
     parser.add_argument(
         "--output_dir", type=str, default="data",
-        help="Output directory for organized dataset"
+        help="Output directory for organized dataset",
     )
     parser.add_argument(
         "--dataset", type=str, default=None,
         choices=list(DATASETS.keys()),
-        help="Download a specific dataset"
+        help="Download a specific dataset",
     )
-    parser.add_argument(
-        "--all", action="store_true",
-        help="Download all available datasets"
-    )
-    parser.add_argument(
-        "--list", action="store_true",
-        help="List available datasets"
-    )
+    parser.add_argument("--all", action="store_true", help="Download all datasets")
+    parser.add_argument("--list", action="store_true", help="List available datasets")
     args = parser.parse_args()
 
     if args.list:
         print("\nAvailable datasets:")
         for key, info in DATASETS.items():
             print(f"  {key:15s} — {info['name']}")
-            print(f"  {'':15s}   kaggle: {info['slug']}")
+            print(f"  {'':15s}   Provides: {', '.join(info['classes'])}")
+        print("\nRecommended for full 4-class setup:")
+        print("  python scripts/download_dataset.py --all")
         return
 
     if not args.dataset and not args.all:
         parser.print_help()
         print("\n\nExamples:")
-        print("  py -3.10 scripts/download_dataset.py --all")
-        print("  py -3.10 scripts/download_dataset.py --dataset cnmc")
-        print("  py -3.10 scripts/download_dataset.py --list")
+        print("  python scripts/download_dataset.py --all")
+        print("  python scripts/download_dataset.py --dataset cnmc")
+        print("  python scripts/download_dataset.py --list")
         return
 
     if not check_kaggle_credentials():
@@ -401,21 +424,13 @@ def main():
     data_dir = Path(args.output_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    total_images = 0
-
     if args.all:
         for key in DATASETS:
-            total_images += download_and_organize(key, data_dir)
+            download_and_organize(key, data_dir)
     elif args.dataset:
-        total_images += download_and_organize(args.dataset, data_dir)
+        download_and_organize(args.dataset, data_dir)
 
-    print_dataset_summary(data_dir)
-
-    if total_images > 0:
-        print(f"\n✅ Dataset ready! You can now train with:")
-        print(f"   py -3.10 scripts/train.py --data_dir {args.output_dir} --epochs 50")
-    else:
-        print(f"\n⚠ No images were organized. Check your Kaggle credentials and network.")
+    print_summary(data_dir)
 
 
 if __name__ == "__main__":

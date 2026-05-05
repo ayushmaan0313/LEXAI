@@ -8,16 +8,14 @@ from pydantic import BaseModel, Field
 class AnalysisResult(BaseModel):
     """Complete analysis result from LEXAI."""
 
-    # Classification
     predicted_class: str = Field(
-        ..., description="Predicted class: ALL, AML, CML, or Normal"
+        ..., description="Predicted class: Normal, ALL, AML, or CML"
     )
     class_index: int = Field(..., description="Predicted class index")
     probabilities: Dict[str, float] = Field(
         ..., description="Class probabilities"
     )
 
-    # Spatial Analysis
     spatial_pattern_score: float = Field(
         ..., description="Spatial clustering metric [0, 1]"
     )
@@ -26,7 +24,6 @@ class AnalysisResult(BaseModel):
         ..., description="Estimated blast cell percentage"
     )
 
-    # Uncertainty
     confidence: float = Field(
         ..., description="Model confidence [0, 1]"
     )
@@ -35,18 +32,17 @@ class AnalysisResult(BaseModel):
     )
     prediction_variance: Dict[str, float] = Field(
         default_factory=dict,
-        description="Per-class prediction variance"
+        description="Per-class prediction variance from MC dropout",
     )
     confidence_interval_low: Dict[str, float] = Field(
         default_factory=dict,
-        description="5th percentile confidence interval"
+        description="5th percentile confidence interval",
     )
     confidence_interval_high: Dict[str, float] = Field(
         default_factory=dict,
-        description="95th percentile confidence interval"
+        description="95th percentile confidence interval",
     )
 
-    # Explainability (base64-encoded images)
     gradcam_heatmap: Optional[str] = Field(
         None, description="Base64-encoded Grad-CAM overlay image"
     )
@@ -54,16 +50,14 @@ class AnalysisResult(BaseModel):
         None, description="Base64-encoded GNN graph overlay image"
     )
 
-    # CNN ensemble details
     cnn_backbone_weights: Dict[str, float] = Field(
         default_factory=dict,
-        description="Attention weights per CNN backbone"
+        description="Learnable fusion weights per CNN backbone",
     )
 
-    # Per-cell analysis
     cell_analysis: List[Dict] = Field(
         default_factory=list,
-        description="Per-cell classification results with class, confidence, bbox"
+        description="Per-cell classification results with class, confidence, bbox",
     )
 
 
@@ -72,4 +66,8 @@ class HealthResponse(BaseModel):
     status: str = "healthy"
     model_loaded: bool = False
     device: str = "cpu"
-    version: str = "0.1.0"
+    version: str = "0.2.0"
+    num_classes: int = 4
+    class_names: List[str] = Field(
+        default_factory=lambda: ["Normal", "ALL", "AML", "CML"]
+    )

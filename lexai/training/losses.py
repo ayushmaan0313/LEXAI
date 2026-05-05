@@ -22,7 +22,6 @@ class MultiTaskLoss(nn.Module):
         spatial_weight: float = 0.3,
         density_weight: float = 0.3,
         learnable_weights: bool = False,
-        num_classes: int = 5,
         label_smoothing: float = 0.1,
         class_weights: torch.Tensor = None,
     ):
